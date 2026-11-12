@@ -1,0 +1,127 @@
+name: CI/CD
+
+# CI  = every push and pull request: build + unit tests + e2e tests
+# CD  = only pushes to main: build the Docker image, smoke-test it, push it to
+#       GitHub Container Registry (ghcr.io), then ask the host to redeploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # lets you press "Run workflow" in the Actions tab
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }} # ghcr.io/panharithhh/learn-docker
+
+jobs:
+  # ---------------------------------------------------------------- 1. CI
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: libraflow
+          POSTGRES_PASSWORD: libraflow
+          POSTGRES_DB: libraflow_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U libraflow -d libraflow_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:e2e
+        env:
+          TEST_DATABASE_URL: postgres://libraflow:libraflow@localhost:5432/libraflow_test
+
+  # ------------------------------------------------- 2. build + smoke-test image
+  docker:
+    needs: test # only runs when every test passed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # needed to push to ghcr.io with the built-in GITHUB_TOKEN
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: libraflow
+          POSTGRES_PASSWORD: libraflow
+          POSTGRES_DB: libraflow_dev
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U libraflow -d libraflow_dev"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:alpine
+        ports: ['6379:6379']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Same as `docker build -t libraflow-api:ci .` on your Mac
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: libraflow-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Same as the `docker run` + `curl /health` you can do locally
+      - name: Smoke-test the container
+        run: |
+          docker run -d --name api --network host \
+            -e DATABASE_URL=postgres://libraflow:libraflow@localhost:5432/libraflow_dev \
+            -e DB_SSL=false -e REDIS_HOST=localhost -e REDIS_PORT=6379 \
+            -e JWT_SECRET=ci-only libraflow-api:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health; then echo; echo "healthy"; exit 0; fi
+            sleep 1
+          done
+          echo "API never became healthy"; docker logs api; exit 1
+
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags: latest + the commit sha, so you can roll back to any commit
+      - name: Push image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+
+  # ---------------------------------------------------------------- 3. CD
+  deploy:
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      # Add the secret RENDER_DEPLOY_HOOK_URL (Repo → Settings → Secrets → Actions)
+      # once you create a Render web service from ghcr.io/panharithhh/learn-docker:latest
+      - name: Trigger deploy
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "No RENDER_DEPLOY_HOOK_URL secret yet, skipping deploy (image is still on ghcr.io)"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null && echo "Deploy triggered"
