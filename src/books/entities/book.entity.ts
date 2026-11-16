@@ -1,5 +1,14 @@
 // src/books/entities/book.entity.ts
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, OneToMany, JoinColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  ManyToOne,
+  OneToMany,
+  JoinColumn,
+} from 'typeorm';
 import { Category } from './category.entity';
 import { BookCopy } from './book-copy.entity';
 import { BookAuthor } from './book-author.entity';
@@ -17,6 +26,9 @@ export class Book {
 
   @Column({ type: 'varchar', length: 255 })
   title: string;
+
+  @Column({ name: 'item_type', type: 'varchar', length: 50, default: 'book' })
+  itemType: string;
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   publisher: string;
@@ -36,7 +48,9 @@ export class Book {
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 
-  @ManyToOne(() => Category, (category) => category.books, { onDelete: 'SET NULL' })
+  @ManyToOne(() => Category, (category) => category.books, {
+    onDelete: 'SET NULL',
+  })
   @JoinColumn({ name: 'category_id' })
   category: Category;
 

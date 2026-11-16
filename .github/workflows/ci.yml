@@ -9,8 +9,13 @@ on:
   pull_request:
   workflow_dispatch: # lets you press "Run workflow" in the Actions tab
 
+# Least privilege for the built-in GITHUB_TOKEN: read the code, write packages (ghcr.io)
+permissions:
+  contents: read
+  packages: write
+
 env:
-  IMAGE: ghcr.io/${{ github.repository }} # ghcr.io/panharithhh/learn-docker
+  IMAGE: ghcr.io/${{ github.repository_owner }}/libraflow-api # ghcr.io/panharithhh/libraflow-api
 
 jobs:
   # ---------------------------------------------------------------- 1. CI
@@ -44,9 +49,6 @@ jobs:
   docker:
     needs: test # only runs when every test passed
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write # needed to push to ghcr.io with the built-in GITHUB_TOKEN
     services:
       postgres:
         image: postgres:17-alpine
@@ -83,7 +85,8 @@ jobs:
           docker run -d --name api --network host \
             -e DATABASE_URL=postgres://libraflow:libraflow@localhost:5432/libraflow_dev \
             -e DB_SSL=false -e REDIS_HOST=localhost -e REDIS_PORT=6379 \
-            -e JWT_SECRET=ci-only libraflow-api:ci
+            -e JWT_ACCESS_SECRET=ci-only-smoke-test-secret-Qw8Zr3Lk5Vn1Xp7Tb2Hm \
+            libraflow-api:ci
           for i in $(seq 1 30); do
             if curl -sf http://localhost:3000/health; then echo; echo "healthy"; exit 0; fi
             sleep 1
@@ -98,7 +101,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tags: latest + the commit sha, so you can roll back to any commit
+      # Tags: the commit sha (exact, for rollbacks) + latest (what Render pulls)
       - name: Push image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
@@ -108,8 +111,8 @@ jobs:
           # One image name, two builds: Intel/AMD servers and Apple-chip Macs
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
           cache-from: type=gha
 
   # ---------------------------------------------------------------- 3. CD
@@ -119,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Add the secret RENDER_DEPLOY_HOOK_URL (Repo → Settings → Secrets → Actions)
-      # once you create a Render web service from ghcr.io/panharithhh/learn-docker:latest
+      # once you create a Render web service from ghcr.io/panharithhh/libraflow-api:latest
       - name: Trigger deploy
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}

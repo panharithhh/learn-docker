@@ -47,6 +47,21 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  readonly assistantSeconds = new Histogram({
+    name: 'libraflow_assistant_duration_seconds',
+    help: 'Member assistant timing: retrieve (search + live facts), first_token, total',
+    labelNames: ['phase'],
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32],
+    registers: [this.registry],
+  });
+
+  readonly assistantTokens = new Counter({
+    name: 'libraflow_assistant_tokens_total',
+    help: 'Tokens the chat model read (prompt) and wrote (output)',
+    labelNames: ['kind'],
+    registers: [this.registry],
+  });
+
   private readonly samples: RequestSample[] = [];
   private readonly loopDelay = monitorEventLoopDelay({ resolution: 20 });
 

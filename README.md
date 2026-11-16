@@ -7,7 +7,7 @@ ids) and measured (Prometheus), and every admin/librarian write lands in `activi
 
 ## Run it locally
 
-You need Postgres and Redis on their default ports: Homebrew services, or `docker compose up -d`.
+You need Postgres and Redis on their default ports (Homebrew services), or run the whole stack in Docker (see below).
 
 ```bash
 cp .env.example .env     # local defaults; nothing here touches Supabase
@@ -83,11 +83,31 @@ Postgres service container.
 
 ## Docker
 
+`compose.yaml` runs three services on one private network: `db` (postgres:16-alpine, data in the
+named volume `pgdata`), `redis` (redis:7-alpine, for the BullMQ queues) and `api` (built from the
+Dockerfile, `restart: unless-stopped`, starts once `db` is healthy and `redis` has started).
+Inside that network containers reach each other by service name, so `.env` sets `DB_HOST=db` and
+`REDIS_HOST=redis` (not `localhost`).
+
 ```bash
-docker compose up -d                          # Postgres + Redis
-docker compose --profile app up -d --build    # + the API image
-docker compose --profile observability up -d  # + Jaeger, Prometheus, Grafana
+# .env for Compose (never commit it):
+#   DB_HOST=db  REDIS_HOST=redis  JWT_ACCESS_SECRET=<random>  API_PORT=3000  DB_HOST_PORT=5433
+docker compose up -d --build                   # db + redis + api
+# First run only: build the schema and demo data in the new database
+DATABASE_URL=postgres://libraflow:libraflow@localhost:5433/libraflow_dev npm run seed:dev
+curl localhost:3000/health                     # 200 with database, redis, memory_heap all "up"
+docker compose --profile observability up -d   # + Jaeger, Prometheus, Grafana
 ```
+
+Persistence check: create a record, `docker compose down`, `docker compose up -d`, and the record
+is still there, because `down` removes containers but keeps the `pgdata` volume (`down -v` deletes it).
+
+## CI/CD and the image
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request: `npm ci`, build,
+unit and E2E tests, then it builds the Docker image and smoke-tests `/health`. On `main` it pushes
+`ghcr.io/panharithhh/libraflow-api:<commit sha>` and `:latest` to GitHub Container Registry, for
+both Intel/AMD and Apple-chip machines. Render deploys from that image, not from the repository.
 
 ## Database note
 

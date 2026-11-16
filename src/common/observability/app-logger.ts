@@ -1,7 +1,5 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { type LoggerService, type LogLevel } from '@nestjs/common';
-import { trace } from '@opentelemetry/api';
+import { logs, SeverityNumber, trace } from '@opentelemetry/api';
 
 export interface LogEntry {
   id: number;
@@ -15,30 +13,29 @@ export interface LogEntry {
 }
 
 const MAX_ENTRIES = 2000;
-const COLORS: Record<LogLevel, string> = {
-  fatal: '\x1b[35m',
-  error: '\x1b[31m',
-  warn: '\x1b[33m',
-  log: '\x1b[32m',
-  debug: '\x1b[36m',
-  verbose: '\x1b[90m',
+
+const SEVERITY_NUMBERS: Record<LogLevel, SeverityNumber> = {
+  fatal: SeverityNumber.FATAL,
+  error: SeverityNumber.ERROR,
+  warn: SeverityNumber.WARN,
+  log: SeverityNumber.INFO,
+  debug: SeverityNumber.DEBUG,
+  verbose: SeverityNumber.TRACE,
 };
 
 /**
- * Nest logger that stamps every line with the active trace/span id, so a log
- * line can be opened as a trace and a trace shows its logs. Writes JSON lines to
- * LOG_FILE (ready for Loki/Promtail later) and keeps a ring buffer for the UI.
+ * Nest logger that stamps every line with the active trace/span id,
+ * outputs structured JSON lines to stdout for Render, sends logs to
+ * Grafana Cloud over OTLP, and keeps an in-memory ring buffer for queries.
  */
 export class AppLogger implements LoggerService {
   private readonly entries: LogEntry[] = [];
   private nextId = 1;
-  private readonly logFile = process.env.LOG_FILE;
-  // Tests turn the console copy off; the ring buffer and file still get every line
+  // Tests can turn the console copy off via LOG_STDOUT=false
   private readonly toStdout = process.env.LOG_STDOUT !== 'false';
 
   constructor() {
-    if (this.logFile) mkdirSync(dirname(this.logFile), { recursive: true });
-    // A closed stdout (terminal gone, pipe reader exited) must not take the API down; the file still gets every line
+    // A closed stdout (terminal gone, pipe reader exited) must not take the API down
     process.stdout.on('error', () => undefined);
   }
 
@@ -126,18 +123,23 @@ export class AppLogger implements LoggerService {
       });
     }
 
+    // Forward to OpenTelemetry Logger (exports to Grafana Cloud via OTLP if configured)
+    const otelLogger = logs.getLogger('libraflow');
+    otelLogger.emit({
+      body: entry.message,
+      severityNumber: SEVERITY_NUMBERS[level] ?? SeverityNumber.INFO,
+      severityText: level.toUpperCase(),
+      attributes: {
+        'log.context': context,
+        ...(entry.meta as Record<string, string | number | boolean | undefined> ?? {}),
+      },
+    });
+
     this.entries.push(entry);
     if (this.entries.length > MAX_ENTRIES) this.entries.shift();
 
-    const traceTag = entry.traceId
-      ? ` \x1b[90m[trace ${entry.traceId.slice(0, 8)}]\x1b[0m`
-      : '';
-    if (this.logFile)
-      appendFileSync(this.logFile, `${JSON.stringify(entry)}\n`);
     if (this.toStdout && process.stdout.writable) {
-      process.stdout.write(
-        `${COLORS[level]}${level.toUpperCase().padEnd(7)}\x1b[0m ${entry.time} \x1b[33m[${context}]\x1b[0m ${entry.message}${traceTag}\n`,
-      );
+      process.stdout.write(`${JSON.stringify(entry)}\n`);
     }
   }
 }

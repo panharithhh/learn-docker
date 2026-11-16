@@ -4,7 +4,22 @@ export const TEST_ENV = {
     process.env.TEST_DATABASE_URL ??
     'postgres://libraflow:libraflow@localhost:5432/libraflow_test',
   DB_SSL: 'false',
-  DEV_AUTH: 'true',
-  LOG_FILE: '',
+  // Tests run on the host, so Redis is localhost even when .env says REDIS_HOST=redis (Compose)
+  REDIS_HOST: process.env.TEST_REDIS_HOST ?? 'localhost',
+  REDIS_PORT: process.env.TEST_REDIS_PORT ?? '6379',
+  // Test-only values for the auth module (the app refuses to start without them)
+  JWT_ACCESS_SECRET: 'e2e-only-jwt-secret-7Fq2xL9mPz4KcR8vWb3NdY6h',
+  FRONTEND_ORIGIN: 'http://localhost:5173',
   LOG_STDOUT: 'false',
+  // Tests never call Gemini (the assistant spec uses a fake) or touch the dev embedding cache
+  GEMINI_API_KEY: '',
+  BOOK_EMBEDDINGS_CACHE: '',
+  // Keeps test queue jobs apart from a dev server sharing the same Redis
+  BULLMQ_PREFIX: 'bull-e2e',
+  // The cron stays off; specs call POST /notifications/overdue/scan instead
+  OVERDUE_SCAN_CRON: 'off',
+  // Reminders go to the log, never to a real mailbox
+  SMTP_HOST: '',
+  // No Telegram bot: nothing contacts api.telegram.org
+  TELEGRAM_BOT_TOKEN: '',
 };

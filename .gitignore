@@ -44,3 +44,6 @@ postgres_data/
 redis_data/
 # TypeScript incremental build state
 *.tsbuildinfo
+
+# Book embeddings for the member assistant (rebuilt from the database)
+.cache/

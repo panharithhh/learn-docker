@@ -1,0 +1,532 @@
+import {
+  BadRequestException,
+  ConflictException,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { RoleName } from '../common/constants';
+import {
+  AuthUserRecord,
+  LoginCandidate,
+  UsersService,
+} from '../users/users.service';
+import { AuthAuditService } from './audit/auth-audit.service';
+import { AuthService } from './auth.service';
+import { AuthConfig } from './config/auth.config';
+import { EmailVerificationService } from './email-verification/email-verification.service';
+import { PasswordService } from './password/password.service';
+import { RefreshTokenService } from './tokens/refresh-token.service';
+
+const PASSWORD = 'a long and unusual passphrase';
+const member: LoginCandidate = {
+  id: '3',
+  email: 'good.student@demo.com',
+  username: 'goodstudent',
+  status: 'active',
+  passwordHash: '$argon2id$real',
+  roleName: 'member',
+  memberId: '30',
+  membershipStatus: 'pending_deposit',
+  emailVerified: false,
+};
+
+async function setup(
+  candidate: LoginCandidate | null,
+  passwordMatches = true,
+  domains: string[] = [],
+) {
+  const transactionManager = { id: 'tx' };
+  const usersService = {
+    findForLogin: vi.fn(() => Promise.resolve(candidate)),
+    findForAuth: vi.fn((): Promise<AuthUserRecord | null> =>
+      Promise.resolve({
+        id: '3',
+        username: 'goodstudent',
+        status: 'active',
+        roleName: 'member',
+        memberId: '30',
+      }),
+    ),
+    recordLogin: vi.fn(() => Promise.resolve()),
+    findPasswordHash: vi.fn(() => Promise.resolve('$argon2id$current')),
+    findProfile: vi.fn(() =>
+      Promise.resolve({
+        email: 'good.student@demo.com',
+        username: 'goodstudent',
+      }),
+    ),
+    updatePasswordHash: vi.fn(() => Promise.resolve()),
+    inTransaction: vi.fn((work: (m: unknown) => Promise<unknown>) =>
+      work(transactionManager),
+    ),
+    registerMember: vi.fn(() =>
+      Promise.resolve({
+        id: '41',
+        email: 'new.member@demo.com',
+        username: 'newmember',
+        memberId: '410',
+        memberCode: 'LF-2026-ABCDEF',
+      }),
+    ),
+  };
+  const passwordService = {
+    hash: vi.fn(() => Promise.resolve('$argon2id$dummy')),
+    verify: vi.fn((_hash: string, _password: string) =>
+      Promise.resolve(passwordMatches),
+    ),
+  };
+  const refreshTokens = {
+    issue: vi.fn(() =>
+      Promise.resolve({ token: 'raw-refresh', expiresAt: new Date() }),
+    ),
+    revokeAllForUser: vi.fn(() => Promise.resolve(2)),
+    rotate: vi.fn(),
+    revokeFamily: vi.fn(() => Promise.resolve(1)),
+    revokeFamilyOf: vi.fn(() => Promise.resolve()),
+  };
+  const jwtService = { signAsync: vi.fn(() => Promise.resolve('signed.jwt')) };
+  const audit = { record: vi.fn() };
+  const emailVerification = { sendCode: vi.fn(() => Promise.resolve()) };
+  const service = new AuthService(
+    usersService as unknown as UsersService,
+    passwordService as unknown as PasswordService,
+    refreshTokens as unknown as RefreshTokenService,
+    jwtService as unknown as JwtService,
+    audit as unknown as AuthAuditService,
+    emailVerification as unknown as EmailVerificationService,
+    { jwtAccessTtlSeconds: 900, memberEmailDomains: domains } as AuthConfig,
+  );
+  await service.onModuleInit();
+  return {
+    service,
+    usersService,
+    passwordService,
+    refreshTokens,
+    jwtService,
+    audit,
+    emailVerification,
+    transactionManager,
+  };
+}
+
+const input = {
+  email: '  Good.Student@Demo.com ',
+  password: PASSWORD,
+  ip: '127.0.0.1',
+  userAgent: 'vitest',
+};
+
+describe('AuthService.login', () => {
+  it('returns the access token, user summary and a new refresh token', async () => {
+    const { service, usersService, refreshTokens, jwtService } =
+      await setup(member);
+    const result = await service.login(input);
+
+    expect(usersService.findForLogin).toHaveBeenCalledWith(
+      'good.student@demo.com',
+    );
+    expect(jwtService.signAsync).toHaveBeenCalledWith({
+      sub: '3',
+      role: RoleName.MEMBER,
+    });
+    expect(refreshTokens.issue).toHaveBeenCalledWith({
+      userId: '3',
+      role: RoleName.MEMBER,
+      ip: '127.0.0.1',
+      userAgent: 'vitest',
+    });
+    expect(usersService.recordLogin).toHaveBeenCalledWith('3');
+    expect(result).toEqual({
+      accessToken: 'signed.jwt',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      refreshToken: 'raw-refresh',
+      refreshTokenExpiresAt: expect.any(Date),
+      user: {
+        id: '3',
+        email: member.email,
+        username: 'goodstudent',
+        role: 'member',
+        membershipStatus: 'pending_deposit',
+        emailVerified: false,
+      },
+    });
+  });
+
+  it('checks an unknown email against the dummy hash, so it takes as long as a wrong password', async () => {
+    const { service, passwordService } = await setup(null, false);
+    await expect(service.login(input)).rejects.toThrow(UnauthorizedException);
+    expect(passwordService.verify).toHaveBeenCalledTimes(1);
+    expect(passwordService.verify).toHaveBeenCalledWith(
+      '$argon2id$dummy',
+      PASSWORD,
+    );
+  });
+
+  it('verifies the password even for a disabled account', async () => {
+    const { service, passwordService } = await setup({
+      ...member,
+      status: 'disabled',
+    });
+    await expect(service.login(input)).rejects.toThrow(UnauthorizedException);
+    expect(passwordService.verify).toHaveBeenCalledWith(
+      '$argon2id$real',
+      PASSWORD,
+    );
+  });
+
+  it.each([
+    ['unknown_email', null, false],
+    ['wrong_password', member, false],
+    ['disabled', { ...member, status: 'disabled' }, true],
+    ['unknown_role', { ...member, roleName: 'superuser' }, true],
+    ['unknown_role', { ...member, roleName: 'MEMBER' }, true],
+    ['member_row_missing', { ...member, memberId: null }, true],
+  ])(
+    '%s → the same 401, no session, an audit event',
+    async (reason, candidate, passwordMatches) => {
+      const { service, refreshTokens, usersService, jwtService, audit } =
+        await setup(
+          candidate as LoginCandidate | null,
+          passwordMatches as boolean,
+        );
+      await expect(service.login(input)).rejects.toThrow(
+        'Invalid email or password',
+      );
+      expect(refreshTokens.issue).not.toHaveBeenCalled();
+      expect(usersService.recordLogin).not.toHaveBeenCalled();
+      expect(jwtService.signAsync).not.toHaveBeenCalled();
+      expect(audit.record).toHaveBeenCalledWith(
+        'LOGIN_FAILURE',
+        expect.objectContaining({ email: 'good.student@demo.com', reason }),
+      );
+    },
+  );
+
+  it('never passes the password or a token to the audit log', async () => {
+    const ok = await setup(member);
+    await ok.service.login(input);
+    const failed = await setup(member, false);
+    await failed.service.login(input).catch(() => undefined);
+    const logged = JSON.stringify([
+      ...ok.audit.record.mock.calls,
+      ...failed.audit.record.mock.calls,
+    ]);
+    expect(logged).not.toContain(PASSWORD);
+    expect(logged).not.toContain('raw-refresh');
+    expect(logged).not.toContain('signed.jwt');
+    expect(logged).not.toContain('$argon2id');
+  });
+});
+
+describe('AuthService.register', () => {
+  const dto = {
+    email: 'new.member@demo.com',
+    username: 'newmember',
+    password: 'a long and unusual passphrase',
+    firstName: 'New',
+  };
+
+  it('hashes the password and creates a pending_deposit MEMBER, without logging in', async () => {
+    const {
+      service,
+      usersService,
+      passwordService,
+      refreshTokens,
+      jwtService,
+    } = await setup(null);
+    await expect(service.register(dto)).resolves.toEqual({
+      id: '41',
+      email: 'new.member@demo.com',
+      username: 'newmember',
+      role: 'member',
+      membershipStatus: 'pending_deposit',
+      emailVerified: false,
+      verificationCodeSent: true,
+    });
+    expect(passwordService.hash).toHaveBeenCalledWith(dto.password);
+    expect(usersService.registerMember).toHaveBeenCalledWith({
+      email: dto.email,
+      username: dto.username,
+      passwordHash: '$argon2id$dummy',
+      firstName: 'New',
+      lastName: undefined,
+      phone: undefined,
+    });
+    expect(refreshTokens.issue).not.toHaveBeenCalled();
+    expect(jwtService.signAsync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['too short', 'short1', /at least 8/],
+    ['common', 'password1', /too common/],
+    ['equal to the email', 'new.member@demo.com', /email or username/],
+    ['equal to the username', 'NewMember', /email or username/],
+  ])(
+    'rejects a password that is %s with 400, before hashing or saving',
+    async (_label, password, rule) => {
+      const { service, usersService, passwordService } = await setup(null);
+      passwordService.hash.mockClear();
+      const error = await service
+        .register({ ...dto, password })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(
+        JSON.stringify((error as BadRequestException).getResponse()),
+      ).toMatch(rule);
+      expect(passwordService.hash).not.toHaveBeenCalled();
+      expect(usersService.registerMember).not.toHaveBeenCalled();
+    },
+  );
+
+  it('emails the first verification code to the new member', async () => {
+    const { service, emailVerification } = await setup(null);
+    await service.register(dto);
+    expect(emailVerification.sendCode).toHaveBeenCalledWith('41');
+  });
+
+  it('still creates the account when the first code cannot be sent', async () => {
+    const { service, emailVerification } = await setup(null);
+    emailVerification.sendCode.mockRejectedValueOnce(new Error('SMTP down'));
+    await expect(service.register(dto)).resolves.toMatchObject({
+      id: '41',
+      verificationCodeSent: false,
+    });
+  });
+
+  it('sends no code when the sign-up is refused', async () => {
+    const { service, usersService, emailVerification } = await setup(null);
+    usersService.registerMember.mockRejectedValueOnce(
+      new ConflictException('Email already registered'),
+    );
+    await expect(service.register(dto)).rejects.toThrow(ConflictException);
+    expect(emailVerification.sendCode).not.toHaveBeenCalled();
+  });
+
+  it('passes a 409 from the users service through', async () => {
+    const { service, usersService } = await setup(null);
+    usersService.registerMember.mockRejectedValueOnce(
+      new ConflictException('Email already registered'),
+    );
+    await expect(service.register(dto)).rejects.toThrow(
+      'Email already registered',
+    );
+  });
+});
+
+describe('AuthService.changePassword', () => {
+  const user = {
+    id: '3',
+    username: 'goodstudent',
+    role: RoleName.MEMBER,
+    memberId: '30',
+  };
+  const dto = {
+    currentPassword: 'old long passphrase',
+    newPassword: 'a brand new passphrase',
+  };
+
+  it('checks the current password, hashes the new one and ends every session, in one transaction', async () => {
+    const {
+      service,
+      passwordService,
+      usersService,
+      refreshTokens,
+      transactionManager,
+    } = await setup(null);
+    passwordService.verify.mockImplementation(
+      (_hash: string, password: string) =>
+        Promise.resolve(password === dto.currentPassword),
+    );
+    await service.changePassword(user, dto);
+    expect(passwordService.hash).toHaveBeenLastCalledWith(dto.newPassword);
+    expect(usersService.updatePasswordHash).toHaveBeenCalledWith(
+      '3',
+      '$argon2id$dummy',
+      transactionManager,
+    );
+    expect(refreshTokens.revokeAllForUser).toHaveBeenCalledWith(
+      '3',
+      transactionManager,
+    );
+  });
+
+  it('a wrong current password → 400, nothing changes', async () => {
+    const { service, usersService, refreshTokens } = await setup(null, false);
+    await expect(service.changePassword(user, dto)).rejects.toThrow(
+      'Current password is incorrect',
+    );
+    expect(usersService.updatePasswordHash).not.toHaveBeenCalled();
+    expect(refreshTokens.revokeAllForUser).not.toHaveBeenCalled();
+  });
+
+  it('the same password again → 400', async () => {
+    const { service, usersService } = await setup(null, true);
+    await expect(service.changePassword(user, dto)).rejects.toThrow(
+      /must be different/,
+    );
+    expect(usersService.updatePasswordHash).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['too short', 'short1', /at least 8/],
+    ['common', 'password1', /too common/],
+    ['equal to the username', 'GoodStudent', /email or username/],
+  ])('a new password that is %s → 400', async (_label, newPassword, rule) => {
+    const { service, passwordService, usersService } = await setup(null);
+    passwordService.verify.mockImplementation(
+      (_hash: string, password: string) =>
+        Promise.resolve(password === dto.currentPassword),
+    );
+    const error = await service
+      .changePassword(user, { ...dto, newPassword })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect(
+      JSON.stringify((error as BadRequestException).getResponse()),
+    ).toMatch(rule);
+    expect(usersService.updatePasswordHash).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthService.refresh', () => {
+  const TOKEN = 'a'.repeat(43);
+  const rotated = {
+    outcome: 'rotated' as const,
+    userId: '3',
+    familyId: 'fam-1',
+    token: 'new-refresh',
+    expiresAt: new Date('2026-11-16T00:00:00Z'),
+  };
+
+  it('returns a new access token (role from the database) and the new refresh token', async () => {
+    const { service, refreshTokens, jwtService } = await setup(null);
+    refreshTokens.rotate.mockResolvedValue(rotated);
+    await expect(service.refresh(TOKEN, { ip: '1.2.3.4' })).resolves.toEqual({
+      accessToken: 'signed.jwt',
+      tokenType: 'Bearer',
+      expiresIn: 900,
+      refreshToken: 'new-refresh',
+      refreshTokenExpiresAt: rotated.expiresAt,
+    });
+    expect(refreshTokens.rotate).toHaveBeenCalledWith(TOKEN, { ip: '1.2.3.4' });
+    expect(jwtService.signAsync).toHaveBeenCalledWith({
+      sub: '3',
+      role: 'member',
+    });
+  });
+
+  it('reuse of an old token → 401 and a REFRESH_TOKEN_REUSE audit event (never the token itself)', async () => {
+    const { service, refreshTokens, audit, jwtService } = await setup(null);
+    refreshTokens.rotate.mockResolvedValue({
+      outcome: 'reuse',
+      userId: '3',
+      familyId: 'fam-1',
+    });
+    await expect(service.refresh(TOKEN, { ip: '1.2.3.4' })).rejects.toThrow(
+      UnauthorizedException,
+    );
+    expect(audit.record).toHaveBeenCalledWith('REFRESH_TOKEN_REUSE', {
+      userId: '3',
+      ip: '1.2.3.4',
+    });
+    expect(JSON.stringify(audit.record.mock.calls)).not.toContain(TOKEN);
+    expect(jwtService.signAsync).not.toHaveBeenCalled();
+  });
+
+  it('an unknown, expired or logged-out token → 401, no audit alarm', async () => {
+    const { service, refreshTokens, audit } = await setup(null);
+    refreshTokens.rotate.mockResolvedValue({ outcome: 'invalid' });
+    await expect(service.refresh(TOKEN)).rejects.toThrow(
+      'Invalid or expired refresh token',
+    );
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['disabled', { status: 'disabled' }],
+    ['deleted', null],
+    ['with a broken member (no member row)', { memberId: null }],
+  ])(
+    'an account that is %s → 401 and the session is ended',
+    async (_label, change) => {
+      const { service, refreshTokens, usersService, jwtService } =
+        await setup(null);
+      refreshTokens.rotate.mockResolvedValue(rotated);
+      usersService.findForAuth.mockResolvedValue(
+        change === null
+          ? null
+          : {
+              id: '3',
+              username: 'goodstudent',
+              status: 'active',
+              roleName: 'member',
+              memberId: '30',
+              ...change,
+            },
+      );
+      await expect(service.refresh(TOKEN)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(refreshTokens.revokeFamily).toHaveBeenCalledWith('fam-1');
+      expect(jwtService.signAsync).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('AuthService.logout', () => {
+  it('ends the session the refresh token belongs to', async () => {
+    const { service, refreshTokens } = await setup(null);
+    await service.logout('b'.repeat(43));
+    expect(refreshTokens.revokeFamilyOf).toHaveBeenCalledWith('b'.repeat(43));
+  });
+});
+
+describe('AuthService.register: school email domains', () => {
+  const dto = {
+    email: 'new.member@itc.edu.kh',
+    username: 'newmember',
+    password: 'a long and unusual passphrase',
+  };
+
+  it('accepts an email at an allowed domain', async () => {
+    const { service, usersService } = await setup(null, true, ['itc.edu.kh']);
+    await expect(service.register(dto)).resolves.toMatchObject({
+      role: 'member',
+    });
+    expect(usersService.registerMember).toHaveBeenCalled();
+  });
+
+  it.each([
+    'new.member@gmail.com',
+    'new.member@itc.edu.kh.evil.com',
+    'new.member@fake-itc.edu.kh',
+  ])('rejects %s with 400, before hashing or saving', async (email) => {
+    const { service, usersService, passwordService } = await setup(null, true, [
+      'itc.edu.kh',
+    ]);
+    passwordService.hash.mockClear();
+    await expect(service.register({ ...dto, email })).rejects.toThrow(
+      'Please sign up with your school email (@itc.edu.kh)',
+    );
+    expect(passwordService.hash).not.toHaveBeenCalled();
+    expect(usersService.registerMember).not.toHaveBeenCalled();
+  });
+
+  it('accepts any of several allowed domains', async () => {
+    const { service } = await setup(null, true, [
+      'itc.edu.kh',
+      'student.itc.edu.kh',
+    ]);
+    await expect(
+      service.register({ ...dto, email: 'a.b@student.itc.edu.kh' }),
+    ).resolves.toBeDefined();
+  });
+
+  it('with no domains configured, any email is accepted', async () => {
+    const { service } = await setup(null, true, []);
+    await expect(
+      service.register({ ...dto, email: 'new.member@gmail.com' }),
+    ).resolves.toBeDefined();
+  });
+});

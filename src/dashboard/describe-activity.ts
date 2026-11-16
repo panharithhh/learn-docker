@@ -5,6 +5,10 @@ const VERBS: Record<string, string> = {
   APPROVE: 'approved',
   REJECT: 'rejected',
   RETURN: 'checked in',
+  VERIFY_DEPOSIT: 'verified the deposit of',
+  SET_ACCOUNT_STATUS: 'changed the account status of',
+  RESET_PASSWORD: 'reset the password of',
+  GOLD_MEMBERSHIP: 'took the gold membership fee of',
 };
 
 export interface ActivityDescription {

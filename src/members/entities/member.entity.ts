@@ -1,9 +1,40 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToOne, OneToMany, JoinColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  OneToOne,
+  OneToMany,
+  ManyToOne,
+  JoinColumn,
+  Check,
+  type Relation,
+} from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Loan } from '../../loans/entities/loan.entity';
 import { Payment } from '../../payments/entities/payment.entity';
+import { MembershipStatus } from '../../common/constants';
 
+// Loans and payments read this entity: keep existing fields and relations as
+// they are. New columns are additive.
 @Entity('members')
+// The original checks from the team's schema (InitialSchema dropped them
+// by accident), restored with their original names.
+@Check('chk_members_deposit_nonnegative', `"deposit_amount" >= 0`)
+@Check(
+  'chk_membership_date_range',
+  `"expiry_date" IS NULL OR "expiry_date" >= "membership_date"`,
+)
+@Check(
+  'CHK_members_membership_status',
+  `"membership_status" IN ('pending_deposit', 'active', 'expired')`,
+)
+// Gold always ends after the membership started (it's bought on an active one).
+@Check(
+  'CHK_members_gold_until',
+  `"gold_until" IS NULL OR "gold_until" > "membership_date"`,
+)
 export class Member {
   @PrimaryGeneratedColumn({ type: 'bigint' })
   id: string;
@@ -14,17 +45,55 @@ export class Member {
   @Column({ name: 'member_code', type: 'varchar', length: 50, unique: true })
   memberCode: string;
 
-  @Column({ name: 'membership_date', type: 'date', default: () => 'CURRENT_DATE' })
+  @Column({
+    name: 'membership_date',
+    type: 'date',
+    default: () => 'CURRENT_DATE',
+  })
   membershipDate: string;
 
-  @Column({ name: 'expiry_date', type: 'date' })
-  expiryDate: string;
+  // Null until the deposit is verified.
+  @Column({ name: 'expiry_date', type: 'date', nullable: true })
+  expiryDate: string | null;
 
-  @Column({ name: 'membership_status', type: 'varchar', length: 20, default: 'active' })
-  membershipStatus: string;
+  @Column({
+    name: 'membership_status',
+    type: 'varchar',
+    length: 20,
+    default: MembershipStatus.PENDING_DEPOSIT,
+  })
+  membershipStatus: MembershipStatus;
 
-  @Column({ name: 'deposit_amount', type: 'decimal', precision: 10, scale: 2, default: 0.0 })
+  @Column({
+    name: 'deposit_amount',
+    type: 'decimal',
+    precision: 10,
+    scale: 2,
+    default: 0.0,
+  })
   depositAmount: number;
+
+  @Column({ name: 'deposit_verified_at', type: 'timestamptz', nullable: true })
+  depositVerifiedAt: Date | null;
+
+  // The librarian or admin who took the deposit.
+  @Column({ name: 'deposit_verified_by', type: 'bigint', nullable: true })
+  depositVerifiedBy: string | null;
+
+  @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'deposit_verified_by' })
+  depositVerifiedByUser: Relation<User> | null;
+
+  // Last day (library date) of the paid gold tier; NULL = never gold. The
+  // member is gold while this date hasn't passed: no tier column that could
+  // disagree with it, and nothing to reset when it ends.
+  @Column({ name: 'gold_until', type: 'date', nullable: true })
+  goldUntil: string | null;
+
+  // Late-return penalty, written by Circulation (Naieang). The Auth & Users
+  // module never writes it and never returns it.
+  @Column({ name: 'blocked_until', type: 'timestamptz', nullable: true })
+  blockedUntil: Date | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
