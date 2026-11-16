@@ -32,6 +32,13 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U libraflow -d libraflow_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      # BullMQ (overdue reminders) and the Terminus /health check need Redis when the E2E suite boots the app
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,7 +68,7 @@ jobs:
           --health-cmd "pg_isready -U libraflow -d libraflow_dev"
           --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
-        image: redis:alpine
+        image: redis:7-alpine
         ports: ['6379:6379']
     steps:
       - uses: actions/checkout@v4
