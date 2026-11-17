@@ -6,7 +6,7 @@ import {
   Query,
   VERSION_NEUTRAL,
 } from '@nestjs/common';
-import { ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
 import {
   HealthCheck,
   HealthCheckService,
@@ -57,12 +57,14 @@ export class ObservabilityController {
     ]);
   }
 
+  @ApiBearerAuth()
   @Roles(RoleName.ADMIN)
   @Get('observability/metrics')
   metricsSummary() {
     return this.metrics.summary();
   }
 
+  @ApiBearerAuth()
   @Roles(RoleName.ADMIN)
   @Get('observability/logs')
   logs(
