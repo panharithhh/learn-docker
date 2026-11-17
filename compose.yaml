@@ -1,6 +1,8 @@
 # LibraFlow local stack: Postgres + Redis + the API, on one private network.
 #   docker compose up -d --build                 → db, redis and api (API on localhost:${API_PORT:-3000})
+#   docker compose run --rm seed                 → schema + demo data in the compose database
 #   docker compose --profile observability up -d → also Jaeger, Prometheus and Grafana
+# Rollback: API_IMAGE_TAG=<old commit sha> runs that published image instead (see README.md).
 # Inside the network, containers reach each other by service name: the API
 # connects to "db" and "redis", never "localhost". .env sets DB_HOST=db and REDIS_HOST=redis.
 
@@ -31,12 +33,17 @@ services:
 
   api:
     build: .
+    # `--build` builds this checkout and tags it :local. Set API_IMAGE_TAG to a commit SHA
+    # to run that image from ghcr.io instead (rollback, see README.md).
+    image: ghcr.io/panharithhh/libraflow-api:${API_IMAGE_TAG:-local}
     env_file: .env
-    environment:
+    environment: &stack-env
       # Built from DB_HOST in .env (Compose reads .env for ${...} too)
       DATABASE_URL: postgres://libraflow:libraflow@${DB_HOST:-db}:5432/libraflow_dev
       DB_SSL: 'false'
-      LOG_FILE: logs/app.log
+      # Always the redis service here, whatever .env says for running on the host
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
     ports:
       - '${API_PORT:-3000}:3000'
     restart: unless-stopped
@@ -45,6 +52,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+
+  # One-off: `docker compose run --rm seed`. Uses the Dockerfile's build stage, which still has
+  # the dev dependencies (faker) the seed needs. It refuses any database but a local one.
+  seed:
+    profiles: ['tools']
+    build:
+      context: .
+      target: build
+    image: libraflow-seed:local
+    env_file: .env
+    environment: *stack-env
+    command: ['node', 'dist/database/seeds/dev-seed.js']
+    depends_on:
+      db:
+        condition: service_healthy
 
   # ---- observability (optional) ----
   jaeger:

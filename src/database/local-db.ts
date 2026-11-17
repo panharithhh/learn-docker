@@ -2,7 +2,8 @@ import { DataSource } from 'typeorm';
 import { ENTITIES } from './entities';
 import { dbSsl } from './ssl';
 
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', 'postgres']);
+// 'postgres' and 'db' are Docker Compose service names
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', 'postgres', 'db']);
 
 /**
  * A DataSource for seeds and test setup that refuses anything but a local or Docker
