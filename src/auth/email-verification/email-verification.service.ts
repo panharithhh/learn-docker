@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -45,6 +46,7 @@ type VerifyOutcome =
 @Injectable()
 export class EmailVerificationService {
   private readonly key: Buffer;
+  private readonly logger = new Logger('EmailVerification');
 
   constructor(
     @InjectRepository(EmailVerificationCode)
@@ -83,8 +85,17 @@ export class EmailVerificationService {
         code,
         CODE_TTL_MINUTES,
       );
-    } catch {
-      // The error may contain the message; record only that sending failed.
+    } catch (err) {
+      // The error's message may quote the email, so log only its code and the
+      // SMTP step that failed (e.g. EAUTH at AUTH PLAIN, 550 at MAIL FROM).
+      const failure = (err ?? {}) as {
+        code?: string;
+        responseCode?: number;
+        command?: string;
+      };
+      this.logger.warn(
+        `verification email not sent: error=${failure.code ?? 'none'} smtp=${failure.responseCode ?? '-'} step=${failure.command ?? '-'}`,
+      );
       this.audit.record('EMAIL_CODE_SEND_FAILED', { userId });
       throw new ServiceUnavailableException(SEND_FAILED);
     }
