@@ -121,6 +121,9 @@ jobs:
             ${{ env.IMAGE }}:${{ github.sha }}
             ${{ env.IMAGE }}:latest
           cache-from: type=gha
+          # Attach supply-chain attestations to the pushed image (Docker Scout checks both)
+          provenance: mode=max # how and from which commit the image was built
+          sbom: true # the list of every package inside the image
 
   # ---------------------------------------------------------------- 3. CD
   deploy:
